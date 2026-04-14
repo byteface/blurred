@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blurred Logo Tool</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --panel-2: #1f2430;
+      --text: #f3f5f7;
+      --muted: #aab3c2;
+      --accent: #7aa2ff;
+      --border: rgba(255,255,255,0.08);
+      --shadow: 0 10px 30px rgba(0,0,0,0.35);
+      --radius: 18px;
+      --preview-width: 1000;
+      --preview-height: 420;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, Arial, sans-serif;
+      background:
+        radial-gradient(circle at top, rgba(122,162,255,0.12), transparent 35%),
+        linear-gradient(180deg, #0b0d12 0%, #11141b 100%);
+      color: var(--text);
+      padding: 24px;
+    }
+
+    .app {
+      max-width: 1280px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 24px;
+    }
+
+    .panel {
+      background: rgba(23, 26, 33, 0.92);
+      backdrop-filter: blur(10px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .controls {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .preview-wrap {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    h1 {
+      font-size: 1.35rem;
+      line-height: 1.2;
+      margin: 0;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .sub {
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.4;
+      margin-top: -6px;
+    }
+
+    .group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 14px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+    }
+
+    label {
+      font-size: 0.92rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.35;
+    }
+
+    input[type="text"],
+    input[type="url"],
+    input[type="number"],
+    select {
+      width: 100%;
+      background: #0f131b;
+      color: var(--text);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 0.95rem;
+      outline: none;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .row-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .value {
+      color: var(--accent);
+      font-weight: 700;
+      min-width: 54px;
+      text-align: right;
+    }
+
+    button {
+      appearance: none;
+      border: none;
+      border-radius: 12px;
+      padding: 12px 16px;
+      background: linear-gradient(180deg, #8ab0ff 0%, #5f8fff 100%);
+      color: #09111f;
+      font-weight: 800;
+      font-size: 0.95rem;
+      cursor: pointer;
+      box-shadow: 0 8px 22px rgba(95, 143, 255, 0.28);
+    }
+
+    button.secondary {
+      background: #2a3140;
+      color: var(--text);
+      box-shadow: none;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .preview-stage {
+      background:
+        linear-gradient(45deg, rgba(255,255,255,0.035) 25%, transparent 25%),
+        linear-gradient(-45deg, rgba(255,255,255,0.035) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, rgba(255,255,255,0.035) 75%),
+        linear-gradient(-45deg, transparent 75%, rgba(255,255,255,0.035) 75%),
+        #0d1016;
+      background-size: 20px 20px;
+      background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      padding: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 520px;
+      overflow: auto;
+    }
+
+    .preview-box {
+      width: min(100%, 1000px);
+      aspect-ratio: 1000 / 420;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    #logoText {
+      color: #7a7a7a;
+      font-size: 140px;
+      font-weight: 900;
+      line-height: 1.2;
+      letter-spacing: -0.04em;
+      white-space: pre-wrap;
+      max-width: 92%;
+      text-align: left;
+      user-select: none;
+      text-rendering: geometricPrecision;
+      -webkit-font-smoothing: antialiased;
+      filter: blur(0px);
+      transform-origin: center;
+    }
+
+    .status {
+      min-height: 1.2em;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    code.inline {
+      background: rgba(255,255,255,0.07);
+      padding: 0.15em 0.4em;
+      border-radius: 6px;
+      font-size: 0.9em;
+    }
+
+    @media (max-width: 980px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+
+      .preview-stage {
+        min-height: 360px;
+      }
+
+      #logoText {
+        font-size: 100px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="panel controls">
+      <div>
+        <h1>Blurred Logo Tool</h1>
+        <div class="sub">Edit text, blur it, swap fonts from Google Fonts, then export a PNG for the overlay.</div>
+      </div>
+
+      <div class="group">
+        <label for="textInput">Logo text</label>
+        <input id="textInput" type="text" value="blurred hidden notes passwords snippets reference text wrapped over multiple lines" />
+      </div>
+
+      <div class="group">
+        <div class="row">
+          <label for="blurSlider">Blur</label>
+          <div class="value" id="blurValue">0px</div>
+        </div>
+        <input id="blurSlider" type="range" min="0" max="40" step="0.1" value="0" />
+      </div>
+
+      <div class="group">
+        <div class="row">
+          <label for="fontSizeSlider">Font size</label>
+          <div class="value" id="fontSizeValue">140px</div>
+        </div>
+        <input id="fontSizeSlider" type="range" min="12" max="260" step="1" value="140" />
+      </div>
+
+      <div class="group">
+        <label for="fontFamilyInput">Font family name</label>
+        <input id="fontFamilyInput" type="text" value="ibm-plex-mono-thin" />
+        <div class="hint">This should match the family name provided by the font CSS, for example <code class="inline">Montserrat</code> or <code class="inline">Bebas Neue</code>.</div>
+      </div>
+
+      <div class="group">
+        <label for="fontUrlInput">Google Fonts CSS URL</label>
+        <input id="fontUrlInput" type="url" value="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;1,100;1,200;1,300;1,400;1,500;1,600;1,900&display=swap" />
+        <div class="hint">Works fine from a local HTML file because the browser fetches the stylesheet directly. Paste a different Google Fonts CSS URL and click load.</div>
+        <div class="button-row">
+          <button id="loadFontBtn" type="button">Load font</button>
+          <button id="removeFontBtn" class="secondary" type="button">Reset to system</button>
+        </div>
+      </div>
+
+      <div class="group">
+        <label for="fontWeightSelect">Font weight</label>
+        <select id="fontWeightSelect">
+          <option value="700">700</option>
+          <option value="800">800</option>
+          <option value="900" selected>900</option>
+        </select>
+      </div>
+
+      <div class="group row-2">
+        <div>
+          <label for="canvasWidthInput">PNG width</label>
+          <input id="canvasWidthInput" type="number" min="64" step="1" value="2000" />
+        </div>
+        <div>
+          <label for="canvasHeightInput">PNG height</label>
+          <input id="canvasHeightInput" type="number" min="64" step="1" value="840" />
+        </div>
+      </div>
+
+      <div class="group row-2">
+        <div>
+          <label for="bgColorInput">Background</label>
+          <input id="bgColorInput" type="text" value="#ffffff" />
+        </div>
+        <div>
+          <label for="textColorInput">Text color</label>
+          <input id="textColorInput" type="text" value="#7a7a7a" />
+        </div>
+      </div>
+
+      <div class="group row-2">
+        <label><input id="transparentBgToggle" type="checkbox" /> Transparent background</label>
+        <label><input id="darkPreviewToggle" type="checkbox" /> Dark preview</label>
+      </div>
+
+      <div class="group">
+        <div class="button-row">
+          <button id="presetLightBtn" class="secondary" type="button">White bg / grey text</button>
+          <button id="presetDarkBtn" class="secondary" type="button">Black bg / light text</button>
+        </div>
+      </div>
+
+      <div class="group row-2">
+        <div>
+          <label for="textBoxWidthInput">Text box width (%)</label>
+          <input id="textBoxWidthInput" type="number" min="20" max="100" step="1" value="92" />
+        </div>
+        <div>
+          <label for="lineHeightInput">Line height</label>
+          <input id="lineHeightInput" type="number" min="0.8" max="2" step="0.05" value="1.25" />
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="hint">Use the preview toggles above to quickly check light or dark overlay variants.</div>
+      </div>
+
+      <div class="group">
+        <div class="button-row">
+          <button id="saveBtn" type="button">Save PNG</button>
+        </div>
+        <div class="status" id="status">Ready.</div>
+      </div>
+    </section>
+
+    <section class="panel preview-wrap">
+      <div class="hint">Checkerboard preview indicates transparency. Export can be transparent or solid depending on the toggle.</div>
+      <div class="preview-stage">
+        <div class="preview-box" id="previewBox">
+          <div id="logoText">blurred</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const textInput = document.getElementById('textInput');
+    const blurSlider = document.getElementById('blurSlider');
+    const blurValue = document.getElementById('blurValue');
+    const fontSizeSlider = document.getElementById('fontSizeSlider');
+    const fontSizeValue = document.getElementById('fontSizeValue');
+    const fontFamilyInput = document.getElementById('fontFamilyInput');
+    const fontUrlInput = document.getElementById('fontUrlInput');
+    const fontWeightSelect = document.getElementById('fontWeightSelect');
+    const loadFontBtn = document.getElementById('loadFontBtn');
+    const removeFontBtn = document.getElementById('removeFontBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const statusEl = document.getElementById('status');
+    const logoText = document.getElementById('logoText');
+    const canvasWidthInput = document.getElementById('canvasWidthInput');
+    const canvasHeightInput = document.getElementById('canvasHeightInput');
+    const bgColorInput = document.getElementById('bgColorInput');
+    const textColorInput = document.getElementById('textColorInput');
+    const textBoxWidthInput = document.getElementById('textBoxWidthInput');
+    const lineHeightInput = document.getElementById('lineHeightInput');
+    const transparentBgToggle = document.getElementById('transparentBgToggle');
+    const darkPreviewToggle = document.getElementById('darkPreviewToggle');
+    const presetLightBtn = document.getElementById('presetLightBtn');
+    const presetDarkBtn = document.getElementById('presetDarkBtn');
+    const previewStage = document.querySelector('.preview-stage');
+    const previewBox = document.getElementById('previewBox');
+
+    let fontLinkEl = null;
+
+    function setStatus(message, isError = false) {
+      statusEl.textContent = message;
+      statusEl.style.color = isError ? '#ff8e8e' : 'var(--muted)';
+    }
+
+    function applySettings() {
+      logoText.textContent = textInput.value || ' ';
+      logoText.style.filter = `blur(${Number(blurSlider.value)}px)`;
+      logoText.style.fontSize = `${Number(fontSizeSlider.value)}px`;
+      logoText.style.fontWeight = fontWeightSelect.value;
+      const family = fontFamilyInput.value.trim() || 'Inter';
+      logoText.style.fontFamily = `'${family}', Arial, sans-serif`;
+      logoText.style.color = textColorInput.value.trim() || '#7a7a7a';
+      logoText.style.maxWidth = `${Math.max(20, Math.min(100, Number(textBoxWidthInput.value) || 92))}%`;
+      logoText.style.lineHeight = String(Number(lineHeightInput.value) || 1.25);
+      previewBox.style.background = transparentBgToggle.checked
+        ? 'transparent'
+        : (bgColorInput.value.trim() || '#ffffff');
+      previewStage.style.background = darkPreviewToggle.checked ? '#0d1016' : '#f1f3f6';
+      blurValue.textContent = `${Number(blurSlider.value)}px`;
+      fontSizeValue.textContent = `${Number(fontSizeSlider.value)}px`;
+    }
+
+    async function loadFont() {
+      const url = fontUrlInput.value.trim();
+      const family = fontFamilyInput.value.trim();
+
+      if (!url) {
+        setStatus('Paste a Google Fonts CSS URL first.', true);
+        return;
+      }
+
+      try {
+        if (fontLinkEl) fontLinkEl.remove();
+        fontLinkEl = document.createElement('link');
+        fontLinkEl.rel = 'stylesheet';
+        fontLinkEl.href = url;
+        document.head.appendChild(fontLinkEl);
+
+        setStatus('Loading font...');
+
+        if (family && document.fonts && document.fonts.load) {
+          await document.fonts.load(`900 32px "${family}"`);
+          await document.fonts.ready;
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        applySettings();
+        setStatus(`Loaded font: ${family || 'custom font'}.`);
+      } catch (err) {
+        console.error(err);
+        setStatus('Font load failed. Check the CSS URL and family name.', true);
+      }
+    }
+
+    function resetFont() {
+      if (fontLinkEl) {
+        fontLinkEl.remove();
+        fontLinkEl = null;
+      }
+      fontFamilyInput.value = 'Arial';
+      fontUrlInput.value = '';
+      applySettings();
+      setStatus('Reset to system font stack.');
+    }
+
+    async function savePNG() {
+      try {
+        const width = Math.max(64, Number(canvasWidthInput.value) || 2000);
+        const height = Math.max(64, Number(canvasHeightInput.value) || 840);
+        const text = textInput.value || ' ';
+        const blur = Number(blurSlider.value) || 0;
+        const fontSize = Number(fontSizeSlider.value) || 140;
+        const fontWeight = fontWeightSelect.value || '900';
+        const family = fontFamilyInput.value.trim() || 'Arial';
+
+        setStatus('Rendering PNG...');
+
+        if (document.fonts && document.fonts.ready) {
+          await document.fonts.ready;
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, width, height);
+        if (!transparentBgToggle.checked) {
+          ctx.fillStyle = bgColorInput.value.trim() || '#ffffff';
+          ctx.fillRect(0, 0, width, height);
+        }
+
+        ctx.save();
+        ctx.fillStyle = textColorInput.value.trim() || '#7a7a7a';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        const scaledFont = Math.round(fontSize * (width / 1000));
+        const lineHeight = (Number(lineHeightInput.value) || 1.25) * scaledFont;
+        const boxWidth = width * (Math.max(20, Math.min(100, Number(textBoxWidthInput.value) || 92)) / 100);
+        const startX = (width - boxWidth) / 2;
+        const startY = scaledFont * 0.5;
+        ctx.font = `${fontWeight} ${scaledFont}px "${family}", Arial, sans-serif`;
+        ctx.filter = `blur(${blur * (width / 1000)}px)`;
+        wrapText(ctx, text, startX, startY, boxWidth, lineHeight);
+        ctx.restore();
+
+        const link = document.createElement('a');
+        const safeName = (text.trim() || 'logo')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        link.download = `${safeName || 'logo'}-${blur.toFixed(1).replace('.', '_')}px.png`;
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+
+        setStatus(transparentBgToggle.checked ? 'PNG saved with transparent background.' : 'PNG saved with solid background.');
+      } catch (err) {
+        console.error(err);
+        setStatus('PNG export failed. Some browsers restrict downloads in unusual contexts.', true);
+      }
+    }
+
+    function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+      const paragraphs = text.split(/\n/);
+      let cursorY = y;
+
+      for (const paragraph of paragraphs) {
+        const words = paragraph.split(/\s+/).filter(Boolean);
+        let line = '';
+
+        for (const word of words) {
+          const testLine = line ? `${line} ${word}` : word;
+          if (ctx.measureText(testLine).width > maxWidth && line) {
+            ctx.fillText(line, x, cursorY);
+            line = word;
+            cursorY += lineHeight;
+          } else {
+            line = testLine;
+          }
+        }
+
+        if (line) {
+          ctx.fillText(line, x, cursorY);
+        }
+        cursorY += lineHeight;
+      }
+    }
+
+    textInput.addEventListener('input', applySettings);
+    blurSlider.addEventListener('input', applySettings);
+    fontSizeSlider.addEventListener('input', applySettings);
+    fontFamilyInput.addEventListener('input', applySettings);
+    fontWeightSelect.addEventListener('change', applySettings);
+    bgColorInput.addEventListener('input', applySettings);
+    textColorInput.addEventListener('input', applySettings);
+    textBoxWidthInput.addEventListener('input', applySettings);
+    lineHeightInput.addEventListener('input', applySettings);
+    transparentBgToggle.addEventListener('change', applySettings);
+    darkPreviewToggle.addEventListener('change', applySettings);
+    loadFontBtn.addEventListener('click', loadFont);
+    removeFontBtn.addEventListener('click', resetFont);
+    saveBtn.addEventListener('click', savePNG);
+    presetLightBtn.addEventListener('click', () => {
+      bgColorInput.value = '#ffffff';
+      textColorInput.value = '#7a7a7a';
+      transparentBgToggle.checked = false;
+      darkPreviewToggle.checked = false;
+      applySettings();
+    });
+    presetDarkBtn.addEventListener('click', () => {
+      bgColorInput.value = '#000000';
+      textColorInput.value = '#d8d8d8';
+      transparentBgToggle.checked = false;
+      darkPreviewToggle.checked = true;
+      applySettings();
+    });
+
+    applySettings();
+    loadFont();
+  </script>
+</body>
+</html>
