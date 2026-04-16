@@ -35,6 +35,7 @@ const DEFAULT_WINDOW_W: i32 = 500;
 const DEFAULT_WINDOW_H: i32 = 500;
 const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
 const BLURRY_PNG: &[u8] = include_bytes!("../blurry.png");
+const APP_SCHEME: Option<app::Scheme> = None;
 
 static OPEN_FILE_SENDER: OnceLock<app::Sender<Msg>> = OnceLock::new();
 
@@ -353,8 +354,10 @@ enum Msg {
 }
 
 fn main() {
-    let app = app::App::default().with_scheme(app::Scheme::Gtk);
-    app::set_scrollbar_size(10);
+    let app = app::App::default();
+    if let Some(scheme) = APP_SCHEME {
+        app::set_scheme(scheme);
+    }
     let (sender, receiver) = app::channel::<Msg>();
     let _ = OPEN_FILE_SENDER.set(sender);
 
@@ -456,7 +459,7 @@ fn main() {
 
     let mut editor = TextDisplay::default_fill();
     editor.set_linenumber_width(0);
-    editor.set_scrollbar_size(10);
+    editor.set_scrollbar_size(0);
     editor.set_text_font(Font::Courier);
     editor.set_text_size(16);
     editor.set_frame(FrameType::FlatBox);
