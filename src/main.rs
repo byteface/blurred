@@ -1,5 +1,6 @@
+mod document;
+
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::ffi::CStr;
 use std::fs;
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use directories::ProjectDirs;
+use document::read_document_text;
 use fltk::{
     app,
     button::{Button, CheckButton},
@@ -35,12 +37,6 @@ const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
 const BLURRY_PNG: &[u8] = include_bytes!("../blurry.png");
 
 static OPEN_FILE_SENDER: OnceLock<app::Sender<Msg>> = OnceLock::new();
-
-macro_rules! debug_log {
-    ($($arg:tt)*) => {
-        eprintln!("[blurred] {}", format!($($arg)*));
-    };
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -227,7 +223,6 @@ impl AppState {
             }
             StateAction::Copied => {
                 let should_hide = self.hide_on_copy && !self.always_visible && self.is_visible();
-                debug_log!("copied should_hide={should_hide}");
                 if should_hide {
                     let changed = self.hide(HideReason::CopyNotice);
                     StateEffects {
@@ -473,7 +468,7 @@ fn main() {
     hide_button_row.set_margin(12);
     hide_button_row.set_pad(0);
     let visible_left_spacer = Frame::default();
-    let mut hide_btn = Button::default().with_label("Hide");
+    let mut hide_btn = Button::default().with_label("🙈 Hide");
     hide_btn.clear_visible_focus();
     let visible_right_spacer = Frame::default();
     hide_button_row.fixed(&visible_left_spacer, 0);
@@ -495,7 +490,7 @@ fn main() {
     show_button_row.set_margin(12);
     show_button_row.set_pad(0);
     let left_spacer = Frame::default();
-    let mut show_btn = Button::default().with_label("Show");
+    let mut show_btn = Button::default().with_label("👀 Show");
     show_btn.clear_visible_focus();
     let right_spacer = Frame::default();
     show_button_row.fixed(&left_spacer, 0);
@@ -683,14 +678,27 @@ fn main() {
 
     let editor_buffer = text_buffer.clone();
     let editor_sender = sender;
+    let editor_context_menu = MenuItem::new(&["Copy"]);
     editor.handle(move |_ed, ev| match ev {
+        Event::Push if app::event_mouse_button() == app::MouseButton::Right => {
+            let selected_text = editor_buffer.selection_text();
+            if !selected_text.is_empty() {
+                let (x, y) = app::event_coords();
+                if let Some(choice) = editor_context_menu.popup(x, y) {
+                    if choice.label().as_deref() == Some("Copy") {
+                        app::copy(&selected_text);
+                        editor_sender.send(Msg::Copied);
+                    }
+                }
+            }
+            true
+        }
         Event::KeyDown | Event::Shortcut => {
             if is_toggle_visibility_event() {
                 editor_sender.send(Msg::ToggleVisibility);
                 return true;
             }
             if is_copy_event() && !editor_buffer.selection_text().is_empty() {
-                debug_log!("copy shortcut detected");
                 editor_sender.send(Msg::Copied);
             }
             false
@@ -799,26 +807,12 @@ fn main() {
                     settings_win.show();
                     settings_win.redraw();
                 }
-                Msg::Show => {
-                    debug_log!("show requested");
-                    effects = state.borrow_mut().apply(StateAction::Show);
-                }
-
-                Msg::Hide => {
-                    debug_log!("temporary hide requested");
-                    effects = state.borrow_mut().apply(StateAction::HideTemporarily);
-                }
-                Msg::ToggleVisibility => {
-                    effects = if state.borrow().is_visible() {
-                        state.borrow_mut().apply(StateAction::HideTemporarily)
-                    } else {
-                        state.borrow_mut().apply(StateAction::Show)
-                    };
-                }
+                Msg::Show => effects = state.borrow_mut().apply(StateAction::Show),
+                Msg::Hide => effects = state.borrow_mut().apply(StateAction::HideTemporarily),
+                Msg::ToggleVisibility => effects = toggle_visibility(&state),
                 Msg::Quit => app.quit(),
                 Msg::ToggleAlwaysVisible => {
                     let enabled = !state.borrow().always_visible;
-                    debug_log!("always_visible={enabled}");
                     effects = state
                         .borrow_mut()
                         .apply(StateAction::SetAlwaysVisible(enabled));
@@ -826,27 +820,11 @@ fn main() {
 
                 Msg::ToggleAutoShow => {
                     let enabled = !state.borrow().auto_show;
-                    debug_log!("auto_show={enabled}");
                     effects = state.borrow_mut().apply(StateAction::SetAutoShow(enabled));
                 }
-                Msg::Tick => {
-                    effects = state.borrow_mut().apply(StateAction::Tick);
-                }
-                Msg::Focused => {
-                    let snapshot = state.borrow();
-                    debug_log!(
-                        "focused visibility={:?} auto_show={} always_visible={}",
-                        snapshot.visibility,
-                        snapshot.auto_show,
-                        snapshot.always_visible
-                    );
-                    drop(snapshot);
-                    effects = state.borrow_mut().apply(StateAction::Focused);
-                }
-                Msg::Unfocused => {
-                    debug_log!("unfocused");
-                    effects = state.borrow_mut().apply(StateAction::Unfocused);
-                }
+                Msg::Tick => effects = state.borrow_mut().apply(StateAction::Tick),
+                Msg::Focused => effects = state.borrow_mut().apply(StateAction::Focused),
+                Msg::Unfocused => effects = state.borrow_mut().apply(StateAction::Unfocused),
                 Msg::DeferredHideOnUnfocus(expected_generation) => {
                     effects = state
                         .borrow_mut()
@@ -1015,8 +993,16 @@ fn set_menu_toggle_by_label(menu: &mut SysMenuBar, target: &str, enabled: bool) 
 }
 
 fn sync_settings(state: &Rc<RefCell<AppState>>) {
+    persist_settings_if_needed(state, true);
+}
+
+fn persist_current_settings(state: &Rc<RefCell<AppState>>) {
+    persist_settings_if_needed(state, false);
+}
+
+fn persist_settings_if_needed(state: &Rc<RefCell<AppState>>, only_if_dirty: bool) {
     let mut s = state.borrow_mut();
-    if !s.settings_dirty {
+    if only_if_dirty && !s.settings_dirty {
         return;
     }
 
@@ -1029,55 +1015,12 @@ fn sync_settings(state: &Rc<RefCell<AppState>>) {
     s.settings_dirty = false;
 }
 
-fn persist_current_settings(state: &Rc<RefCell<AppState>>) {
-    let mut s = state.borrow_mut();
-    s.settings.always_visible = s.always_visible;
-    s.settings.auto_show = s.auto_show;
-    s.settings.hide_on_copy = s.hide_on_copy;
-    s.settings.dark_mode = s.dark_mode;
-    s.settings.opacity = s.opacity;
-    save_saved_state(&s.settings);
-    s.settings_dirty = false;
-}
-
-fn decode_document_text(raw: &str) -> String {
-    if raw.trim_start().starts_with("{\\rtf") {
-        strip_basic_rtf(raw)
+fn toggle_visibility(state: &Rc<RefCell<AppState>>) -> StateEffects {
+    if state.borrow().is_visible() {
+        state.borrow_mut().apply(StateAction::HideTemporarily)
     } else {
-        raw.to_owned()
+        state.borrow_mut().apply(StateAction::Show)
     }
-}
-
-fn read_document_text(path: &PathBuf) -> Result<String, String> {
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase());
-
-    if matches!(extension.as_deref(), Some("rtf")) {
-        if let Ok(text) = convert_rtf_with_textutil(path) {
-            return Ok(text);
-        }
-    }
-
-    fs::read_to_string(path)
-        .map(|raw| decode_document_text(&raw))
-        .map_err(|err| format!("Could not open file: {err}"))
-}
-
-fn convert_rtf_with_textutil(path: &PathBuf) -> Result<String, String> {
-    let output = Command::new("textutil")
-        .args(["-convert", "txt", "-stdout"])
-        .arg(path)
-        .output()
-        .map_err(|err| format!("textutil failed: {err}"))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
-    Ok(text.trim_end().to_owned())
 }
 
 fn open_external_url(url: &str) -> Result<(), String> {
@@ -1118,131 +1061,6 @@ fn handle_open_file(path_ptr: *const std::os::raw::c_char) {
     if let Some(sender) = OPEN_FILE_SENDER.get() {
         sender.send(Msg::OpenPath(PathBuf::from(path)));
     }
-}
-
-fn strip_basic_rtf(raw: &str) -> String {
-    let mut out = String::new();
-    let mut chars = raw.chars().peekable();
-    let mut skip_stack = vec![false];
-    let mut skip_next_group = false;
-    let destinations: HashSet<&'static str> = [
-        "fonttbl",
-        "colortbl",
-        "stylesheet",
-        "info",
-        "pict",
-        "expandedcolortbl",
-        "generator",
-    ]
-    .into_iter()
-    .collect();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '{' => {
-                let parent_skip = *skip_stack.last().unwrap_or(&false);
-                skip_stack.push(parent_skip || skip_next_group);
-                skip_next_group = false;
-            }
-            '}' => {
-                skip_stack.pop();
-                if skip_stack.is_empty() {
-                    skip_stack.push(false);
-                }
-            }
-            '\\' => match chars.peek().copied() {
-                Some('\\') | Some('{') | Some('}') => {
-                    let escaped = chars.next().unwrap_or_default();
-                    if !*skip_stack.last().unwrap_or(&false) {
-                        out.push(escaped);
-                    }
-                }
-                Some('\'') => {
-                    chars.next();
-                    let a = chars.next();
-                    let b = chars.next();
-                    if let (Some(a), Some(b)) = (a, b) {
-                        if !*skip_stack.last().unwrap_or(&false) {
-                            if let Ok(byte) = u8::from_str_radix(&format!("{a}{b}"), 16) {
-                                out.push(byte as char);
-                            }
-                        }
-                    }
-                }
-                Some('*') => {
-                    chars.next();
-                    skip_next_group = true;
-                }
-                Some(c) if c.is_ascii_alphabetic() => {
-                    let mut word = String::new();
-                    while let Some(next) = chars.peek().copied() {
-                        if next.is_ascii_alphabetic() {
-                            word.push(next);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    while let Some(next) = chars.peek().copied() {
-                        if next == '-' || next.is_ascii_digit() {
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    if chars.peek() == Some(&' ') {
-                        chars.next();
-                    }
-
-                    if destinations.contains(word.as_str()) {
-                        if let Some(current) = skip_stack.last_mut() {
-                            *current = true;
-                        }
-                        continue;
-                    }
-
-                    if *skip_stack.last().unwrap_or(&false) {
-                        continue;
-                    }
-
-                    if word == "par" || word == "line" {
-                        out.push('\n');
-                    } else if word == "tab" {
-                        out.push('\t');
-                    }
-                }
-                Some(_) => {
-                    chars.next();
-                }
-                None => {}
-            },
-            '\r' => {}
-            _ => {
-                if !*skip_stack.last().unwrap_or(&false) {
-                    out.push(ch);
-                }
-            }
-        }
-    }
-
-    out.lines()
-        .map(str::trim_end)
-        .filter(|line| !looks_like_rtf_junk(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_owned()
-}
-
-fn looks_like_rtf_junk(line: &str) -> bool {
-    let lower = line.trim().to_ascii_lowercase();
-    if lower.is_empty() {
-        return true;
-    }
-    if lower.chars().all(|c| ";:".contains(c)) {
-        return true;
-    }
-    lower == "helvetica" || lower == "times" || lower == "courier"
 }
 
 fn capture_window_state(state: &Rc<RefCell<AppState>>, wind: &Window) {
@@ -1317,24 +1135,16 @@ fn initial_window_rect(settings: &SavedState) -> (i32, i32, i32, i32) {
 
 fn load_saved_state() -> SavedState {
     let Some(path) = settings_path() else {
-        debug_log!("no settings path available");
         return SavedState::default();
     };
 
     let Ok(contents) = fs::read_to_string(&path) else {
-        debug_log!("no settings file at {}", path.display());
         return SavedState::default();
     };
 
     match serde_json::from_str::<SavedState>(&contents) {
-        Ok(state) => {
-            debug_log!("loaded settings from {}", path.display());
-            state
-        }
-        Err(err) => {
-            debug_log!("failed to parse settings {}: {}", path.display(), err);
-            SavedState::default()
-        }
+        Ok(state) => state,
+        Err(_) => SavedState::default(),
     }
 }
 
