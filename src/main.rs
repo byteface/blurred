@@ -33,6 +33,7 @@ const FOCUS_HIDE_DELAY_SECONDS: f64 = 0.075;
 const DEFAULT_OPACITY: f64 = 1.0;
 const DEFAULT_WINDOW_W: i32 = 500;
 const DEFAULT_WINDOW_H: i32 = 500;
+const MAX_RECENT_FILES: usize = 8;
 const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
 const BLURRY_PNG: &[u8] = include_bytes!("../blurry.png");
 const APP_SCHEME: Option<app::Scheme> = None;
@@ -48,6 +49,7 @@ struct SavedState {
     dark_mode: bool,
     opacity: f64,
     last_file: Option<PathBuf>,
+    recent_files: Vec<PathBuf>,
     window_x: i32,
     window_y: i32,
     window_w: i32,
@@ -63,6 +65,7 @@ impl Default for SavedState {
             dark_mode: false,
             opacity: DEFAULT_OPACITY,
             last_file: None,
+            recent_files: Vec::new(),
             window_x: 100,
             window_y: 100,
             window_w: DEFAULT_WINDOW_W,
@@ -110,12 +113,14 @@ impl AppState {
             StateAction::FileLoaded { path } => {
                 self.current_file = Some(path.clone());
                 self.settings.last_file = Some(path);
+                self.push_recent_file();
                 self.visibility = VisibilityState::Visible;
                 self.copied_notice_until = None;
                 self.last_error = None;
                 self.settings_dirty = true;
                 StateEffects {
                     sync_title: true,
+                    sync_menu: true,
                     apply_visibility: true,
                     focus_editor: true,
                     ..StateEffects::default()
@@ -294,6 +299,16 @@ impl AppState {
         };
         changed
     }
+
+    fn push_recent_file(&mut self) {
+        let Some(current) = self.current_file.clone() else {
+            return;
+        };
+
+        self.settings.recent_files.retain(|path| path != &current);
+        self.settings.recent_files.insert(0, current);
+        self.settings.recent_files.truncate(MAX_RECENT_FILES);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -393,63 +408,7 @@ fn main() {
 
     let mut menu = SysMenuBar::default().with_size(0, 30);
     menu.set_frame(FrameType::FlatBox);
-    menu.add_emit(
-        "&File/Open...\t",
-        Shortcut::Ctrl | 'o',
-        MenuFlag::Normal,
-        sender,
-        Msg::Open,
-    );
-    menu.add_emit(
-        "&File/Reload\t",
-        Shortcut::Ctrl | 'r',
-        MenuFlag::Normal,
-        sender,
-        Msg::Reload,
-    );
-    menu.add_emit(
-        "&Options/Always Visible\t",
-        Shortcut::None,
-        MenuFlag::Toggle,
-        sender,
-        Msg::ToggleAlwaysVisible,
-    );
-    menu.add_emit(
-        "&Options/Auto Show\t",
-        Shortcut::None,
-        MenuFlag::Toggle,
-        sender,
-        Msg::ToggleAutoShow,
-    );
-    menu.add_emit(
-        "&Options/Settings...\t",
-        Shortcut::None,
-        MenuFlag::Normal,
-        sender,
-        Msg::OpenSettings,
-    );
-    menu.add_emit(
-        "&View/Show\t",
-        Shortcut::None,
-        MenuFlag::Normal,
-        sender,
-        Msg::Show,
-    );
-    menu.add_emit(
-        "&View/Hide\t",
-        Shortcut::None,
-        MenuFlag::Normal,
-        sender,
-        Msg::Hide,
-    );
-    menu.add_emit(
-        "&File/Quit\t",
-        Shortcut::Ctrl | 'q',
-        MenuFlag::Normal,
-        sender,
-        Msg::Quit,
-    );
-    sync_menu_state(&state, &mut menu);
+    rebuild_menu(&state, &mut menu, sender);
     root.fixed(&menu, 30);
 
     let mut visible_group = Group::default_fill();
@@ -773,7 +732,7 @@ fn main() {
     wind.set_opacity(state.borrow().opacity);
 
     sync_window_title(&state, &mut wind);
-    sync_menu_state(&state, &mut menu);
+    rebuild_menu(&state, &mut menu, sender);
     apply_visibility_state(
         &state,
         &mut root,
@@ -854,7 +813,7 @@ fn main() {
                 sync_window_title(&state, &mut wind);
             }
             if effects.sync_menu {
-                sync_menu_state(&state, &mut menu);
+                rebuild_menu(&state, &mut menu, sender);
             }
             if effects.apply_visibility {
                 apply_visibility_state(
@@ -966,15 +925,127 @@ fn sync_window_title(state: &Rc<RefCell<AppState>>, wind: &mut Window) {
     }
 }
 
-fn sync_menu_state(state: &Rc<RefCell<AppState>>, menu: &mut SysMenuBar) {
-    let (always_visible, auto_show) = {
+fn rebuild_menu(state: &Rc<RefCell<AppState>>, menu: &mut SysMenuBar, sender: app::Sender<Msg>) {
+    let (always_visible, auto_show, recent_files) = {
         let s = state.borrow();
-        (s.always_visible, s.auto_show)
+        (
+            s.always_visible,
+            s.auto_show,
+            s.settings.recent_files.clone(),
+        )
     };
+
+    menu.clear();
+    menu.add_emit(
+        "&File/Open...\t",
+        Shortcut::Ctrl | 'o',
+        MenuFlag::Normal,
+        sender,
+        Msg::Open,
+    );
+
+    if recent_files.is_empty() {
+        menu.add(
+            "&File/Open Recent/(Empty)",
+            Shortcut::None,
+            MenuFlag::Inactive,
+            |_| {},
+        );
+    } else {
+        for (index, path) in recent_files.into_iter().enumerate() {
+            let label = format!(
+                "&File/Open Recent/{}",
+                format_recent_menu_label(index, &path)
+            );
+            menu.add_emit(
+                &label,
+                Shortcut::None,
+                MenuFlag::Normal,
+                sender,
+                Msg::OpenPath(path),
+            );
+        }
+    }
+
+    menu.add_emit(
+        "&File/Reload\t",
+        Shortcut::Ctrl | 'r',
+        MenuFlag::Normal,
+        sender,
+        Msg::Reload,
+    );
+    menu.add_emit(
+        "&File/Quit\t",
+        Shortcut::Ctrl | 'q',
+        MenuFlag::Normal,
+        sender,
+        Msg::Quit,
+    );
+    menu.add_emit(
+        "&Options/Always Visible\t",
+        Shortcut::None,
+        MenuFlag::Toggle,
+        sender,
+        Msg::ToggleAlwaysVisible,
+    );
+    menu.add_emit(
+        "&Options/Auto Show\t",
+        Shortcut::None,
+        MenuFlag::Toggle,
+        sender,
+        Msg::ToggleAutoShow,
+    );
+    menu.add_emit(
+        "&Options/Settings...\t",
+        Shortcut::None,
+        MenuFlag::Normal,
+        sender,
+        Msg::OpenSettings,
+    );
+    menu.add_emit(
+        "&View/Show\t",
+        Shortcut::None,
+        MenuFlag::Normal,
+        sender,
+        Msg::Show,
+    );
+    menu.add_emit(
+        "&View/Hide\t",
+        Shortcut::None,
+        MenuFlag::Normal,
+        sender,
+        Msg::Hide,
+    );
 
     set_menu_toggle_by_label(menu, "Always Visible", always_visible);
     set_menu_toggle_by_label(menu, "Auto Show", auto_show);
     menu.redraw();
+}
+
+fn format_recent_menu_label(index: usize, path: &PathBuf) -> String {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Untitled");
+    let folder_name = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str());
+
+    let label = if let Some(folder) = folder_name {
+        format!("{}. {} ({})", index + 1, file_name, folder)
+    } else {
+        format!("{}. {}", index + 1, file_name)
+    };
+
+    sanitize_menu_label(&label)
+}
+
+fn sanitize_menu_label(label: &str) -> String {
+    label
+        .replace('&', "&&")
+        .replace('/', " / ")
+        .replace('\\', " ")
 }
 
 fn set_menu_toggle_by_label(menu: &mut SysMenuBar, target: &str, enabled: bool) {

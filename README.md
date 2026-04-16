@@ -19,7 +19,7 @@ blurred is not a password manager. It is a quick-reference window for text you n
 
 ## Origin
 
-This rebuild comes from the original tiny prototype by byteface:
+This Rust app is inspired by this tiny python prototype:
 
 https://gist.github.com/byteface/9ca8c3d885d08284bfaebef6256591b2
 
@@ -38,7 +38,7 @@ https://gist.github.com/byteface/9ca8c3d885d08284bfaebef6256591b2
 
 ## Rust Build
 
-The real app is rebuilt in Rust as a lightweight desktop utility:
+Check the makefile to build for your platform
 
 ```bash
 make run
@@ -51,30 +51,3 @@ make check
 make release
 make package
 ```
-
-## Release process
-
-GitHub Actions is set up to build release artifacts for macOS, Windows, and Linux whenever you push a version tag.
-
-Create and push a tag like this:
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-That workflow will build the platform artifacts and attach them to the GitHub release page for that tag.
-
-## Positioning
-
-The cleanest way to describe blurred is:
-
-> A privacy-first desktop reference window for sensitive text that auto-conceals itself when you are not using it.
-
-That framing is more honest and more durable than pretending it replaces secure credential storage.
-
-## Next steps
-
-- package it for macOS, Windows, and Linux
-- add a global hotkey
-- offer optional encrypted file support
