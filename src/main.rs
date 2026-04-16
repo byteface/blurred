@@ -22,8 +22,8 @@ use fltk::{
     image::PngImage,
     menu::{MacAppMenu, MenuFlag, MenuItem, SysMenuBar, WindowMenuStyle},
     misc::Spinner,
+    output::MultilineOutput,
     prelude::*,
-    text::{TextBuffer, TextDisplay, WrapMode},
     window::Window,
 };
 use serde::{Deserialize, Serialize};
@@ -416,16 +416,13 @@ fn main() {
     visible_flex.set_margin(0);
     visible_flex.set_pad(0);
 
-    let mut editor = TextDisplay::default_fill();
-    editor.set_linenumber_width(0);
-    editor.set_scrollbar_size(0);
+    let mut editor = MultilineOutput::default_fill();
     editor.set_text_font(Font::Courier);
     editor.set_text_size(16);
     editor.set_frame(FrameType::FlatBox);
     editor.set_color(Color::White);
-    editor.wrap_mode(WrapMode::AtBounds, 0);
-    let mut text_buffer = TextBuffer::default();
-    editor.set_buffer(Some(text_buffer.clone()));
+    editor.set_readonly(true);
+    editor.set_wrap(true);
     let mut hide_button_row = Flex::default().row();
     hide_button_row.set_margin(12);
     hide_button_row.set_pad(0);
@@ -638,29 +635,17 @@ fn main() {
         let _app_menu_items = app_menu_items;
     }
 
-    let editor_buffer = text_buffer.clone();
     let editor_sender = sender;
-    let editor_context_menu = MenuItem::new(&["Copy"]);
+    let editor_for_events = editor.clone();
     editor.handle(move |_ed, ev| match ev {
-        Event::Push if app::event_mouse_button() == app::MouseButton::Right => {
-            let selected_text = editor_buffer.selection_text();
-            if !selected_text.is_empty() {
-                let (x, y) = app::event_coords();
-                if let Some(choice) = editor_context_menu.popup(x, y) {
-                    if choice.label().as_deref() == Some("Copy") {
-                        app::copy(&selected_text);
-                        editor_sender.send(Msg::Copied);
-                    }
-                }
-            }
-            true
-        }
+        Event::Push if app::event_mouse_button() == app::MouseButton::Right => true,
+        Event::Released if app::event_mouse_button() == app::MouseButton::Right => true,
         Event::KeyDown | Event::Shortcut => {
             if is_toggle_visibility_event() {
                 editor_sender.send(Msg::ToggleVisibility);
                 return true;
             }
-            if is_copy_event() && !editor_buffer.selection_text().is_empty() {
+            if is_copy_event() && editor_for_events.position() != editor_for_events.mark() {
                 editor_sender.send(Msg::Copied);
             }
             false
@@ -715,7 +700,7 @@ fn main() {
         .find(|path| path.exists() && path.is_file());
     let load_last = startup_file.or_else(|| state.borrow().settings.last_file.clone());
     if let Some(path) = load_last {
-        load_file_into_state(&state, path, &mut text_buffer);
+        load_file_into_state(&state, path, &mut editor);
     }
     apply_theme(
         state.borrow().dark_mode,
@@ -748,16 +733,16 @@ fn main() {
             match msg {
                 Msg::Open => {
                     if let Some(path) = choose_file() {
-                        effects = load_file_into_state(&state, path, &mut text_buffer);
+                        effects = load_file_into_state(&state, path, &mut editor);
                     }
                 }
                 Msg::OpenPath(path) => {
-                    effects = load_file_into_state(&state, path, &mut text_buffer);
+                    effects = load_file_into_state(&state, path, &mut editor);
                 }
                 Msg::Reload => {
                     let current_file = state.borrow().current_file.clone();
                     if let Some(path) = current_file {
-                        effects = load_file_into_state(&state, path, &mut text_buffer);
+                        effects = load_file_into_state(&state, path, &mut editor);
                     }
                 }
                 Msg::OpenSettings => {
@@ -872,11 +857,11 @@ fn is_toggle_visibility_event() -> bool {
 fn load_file_into_state(
     state: &Rc<RefCell<AppState>>,
     path: PathBuf,
-    buffer: &mut TextBuffer,
+    editor: &mut MultilineOutput,
 ) -> StateEffects {
     match read_document_text(&path) {
         Ok(text) => {
-            buffer.set_text(&text);
+            editor.set_value(&text);
             state.borrow_mut().apply(StateAction::FileLoaded { path })
         }
         Err(err) => state.borrow_mut().apply(StateAction::FileLoadFailed(err)),
@@ -1155,7 +1140,7 @@ fn capture_window_state(state: &Rc<RefCell<AppState>>, wind: &Window) {
 fn apply_theme(
     dark_mode: bool,
     wind: &mut Window,
-    editor: &mut TextDisplay,
+    editor: &mut MultilineOutput,
     hidden_preview: &mut Frame,
     settings_win: &mut Window,
     settings_hide_on_copy: &mut CheckButton,
