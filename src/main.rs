@@ -26,7 +26,7 @@ use fltk::{
 };
 use serde::{Deserialize, Serialize};
 
-const TICK_SECONDS: f64 = 0.1;
+const NOTICE_TICK_SECONDS: f64 = 0.1;
 const FOCUS_HIDE_DELAY_SECONDS: f64 = 0.075;
 const DEFAULT_OPACITY: f64 = 1.0;
 const DEFAULT_WINDOW_W: i32 = 500;
@@ -49,7 +49,6 @@ struct SavedState {
     always_visible: bool,
     auto_show: bool,
     hide_on_copy: bool,
-    inactivity_seconds: u64,
     dark_mode: bool,
     opacity: f64,
     last_file: Option<PathBuf>,
@@ -65,7 +64,6 @@ impl Default for SavedState {
             always_visible: false,
             auto_show: true,
             hide_on_copy: true,
-            inactivity_seconds: 60,
             dark_mode: false,
             opacity: DEFAULT_OPACITY,
             last_file: None,
@@ -79,21 +77,16 @@ impl Default for SavedState {
 
 struct AppState {
     current_file: Option<PathBuf>,
-    text: String,
-    visible: bool,
-    manually_hidden: bool,
+    visibility: VisibilityState,
     always_visible: bool,
     auto_show: bool,
     hide_on_copy: bool,
-    inactivity_seconds: u64,
     dark_mode: bool,
     opacity: f64,
-    inactivity_deadline: Option<Instant>,
     copied_notice_until: Option<Instant>,
     last_error: Option<String>,
     settings_dirty: bool,
     settings: SavedState,
-    copy_hide_generation: u64,
     focus_generation: u64,
 }
 
@@ -102,24 +95,247 @@ impl AppState {
         let settings = load_saved_state();
         Self {
             current_file: settings.last_file.clone(),
-            text: String::new(),
-            visible: true,
-            manually_hidden: false,
+            visibility: VisibilityState::Visible,
             always_visible: settings.always_visible,
             auto_show: settings.auto_show,
             hide_on_copy: settings.hide_on_copy,
-            inactivity_seconds: settings.inactivity_seconds,
             dark_mode: settings.dark_mode,
             opacity: settings.opacity,
-            inactivity_deadline: None,
             copied_notice_until: None,
             last_error: None,
             settings_dirty: false,
             settings,
-            copy_hide_generation: 0,
             focus_generation: 0,
         }
     }
+
+    fn apply(&mut self, action: StateAction) -> StateEffects {
+        match action {
+            StateAction::FileLoaded { path } => {
+                self.current_file = Some(path.clone());
+                self.settings.last_file = Some(path);
+                self.visibility = VisibilityState::Visible;
+                self.copied_notice_until = None;
+                self.last_error = None;
+                self.settings_dirty = true;
+                StateEffects {
+                    sync_title: true,
+                    apply_visibility: true,
+                    focus_editor: true,
+                    ..StateEffects::default()
+                }
+            }
+            StateAction::FileLoadFailed(err) => {
+                self.last_error = Some(err);
+                StateEffects {
+                    redraw_hidden_preview: true,
+                    ..StateEffects::default()
+                }
+            }
+            StateAction::Show => {
+                let changed = self.show();
+                StateEffects {
+                    apply_visibility: changed,
+                    focus_editor: changed,
+                    ..StateEffects::default()
+                }
+            }
+            StateAction::HideTemporarily => {
+                let changed = self.hide(HideReason::Temporary {
+                    ignored_focus_after_hide: false,
+                });
+                StateEffects {
+                    apply_visibility: changed,
+                    redraw_hidden_preview: changed,
+                    ..StateEffects::default()
+                }
+            }
+            StateAction::SetAlwaysVisible(enabled) => {
+                self.always_visible = enabled;
+                self.settings_dirty = true;
+                let mut effects = StateEffects {
+                    sync_menu: true,
+                    ..StateEffects::default()
+                };
+                if enabled {
+                    let changed = self.show();
+                    effects.apply_visibility = changed;
+                    effects.focus_editor = changed;
+                }
+                effects
+            }
+            StateAction::SetAutoShow(enabled) => {
+                self.auto_show = enabled;
+                self.settings_dirty = true;
+                StateEffects {
+                    sync_menu: true,
+                    ..StateEffects::default()
+                }
+            }
+            StateAction::Focused => {
+                self.focus_generation = self.focus_generation.wrapping_add(1);
+                if matches!(
+                    self.visibility,
+                    VisibilityState::Hidden(HideReason::Temporary {
+                        ignored_focus_after_hide: false
+                    })
+                ) {
+                    self.visibility = VisibilityState::Hidden(HideReason::Temporary {
+                        ignored_focus_after_hide: true,
+                    });
+                    StateEffects::default()
+                } else if self.is_visible() || !self.should_auto_show_on_focus() {
+                    StateEffects::default()
+                } else {
+                    let changed = self.show();
+                    StateEffects {
+                        apply_visibility: changed,
+                        focus_editor: changed,
+                        ..StateEffects::default()
+                    }
+                }
+            }
+            StateAction::Unfocused => {
+                if self.always_visible || !self.is_visible() {
+                    if matches!(
+                        self.visibility,
+                        VisibilityState::Hidden(HideReason::Temporary {
+                            ignored_focus_after_hide: true
+                        })
+                    ) {
+                        self.visibility = VisibilityState::Hidden(HideReason::FocusLoss);
+                    }
+                    StateEffects::default()
+                } else {
+                    self.focus_generation = self.focus_generation.wrapping_add(1);
+                    StateEffects {
+                        schedule_hide_generation: Some(self.focus_generation),
+                        ..StateEffects::default()
+                    }
+                }
+            }
+            StateAction::DeferredHideOnUnfocus(expected_generation) => {
+                if self.focus_generation == expected_generation && !self.always_visible {
+                    let changed = self.hide(HideReason::FocusLoss);
+                    StateEffects {
+                        apply_visibility: changed,
+                        redraw_hidden_preview: changed,
+                        ..StateEffects::default()
+                    }
+                } else {
+                    StateEffects::default()
+                }
+            }
+            StateAction::Copied => {
+                let should_hide = self.hide_on_copy && !self.always_visible && self.is_visible();
+                debug_log!("copied should_hide={should_hide}");
+                if should_hide {
+                    let changed = self.hide(HideReason::CopyNotice);
+                    StateEffects {
+                        apply_visibility: changed,
+                        redraw_hidden_preview: true,
+                        ..StateEffects::default()
+                    }
+                } else {
+                    StateEffects::default()
+                }
+            }
+            StateAction::Tick => {
+                if self
+                    .copied_notice_until
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    self.copied_notice_until = None;
+                    StateEffects {
+                        redraw_hidden_preview: true,
+                        ..StateEffects::default()
+                    }
+                } else {
+                    StateEffects::default()
+                }
+            }
+        }
+    }
+
+    fn should_auto_show_on_focus(&self) -> bool {
+        if matches!(
+            self.visibility,
+            VisibilityState::Hidden(HideReason::Temporary { .. })
+        ) {
+            return false;
+        }
+
+        if self
+            .copied_notice_until
+            .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            return false;
+        }
+
+        self.auto_show || self.always_visible
+    }
+
+    fn is_visible(&self) -> bool {
+        matches!(self.visibility, VisibilityState::Visible)
+    }
+
+    fn show(&mut self) -> bool {
+        let changed = !self.is_visible() || self.copied_notice_until.is_some();
+        self.visibility = VisibilityState::Visible;
+        self.copied_notice_until = None;
+        changed
+    }
+
+    fn hide(&mut self, reason: HideReason) -> bool {
+        if self.always_visible {
+            return false;
+        }
+
+        let changed = self.is_visible();
+        self.visibility = VisibilityState::Hidden(reason);
+        self.copied_notice_until = match reason {
+            HideReason::CopyNotice => Some(Instant::now() + std::time::Duration::from_secs(1)),
+            HideReason::Temporary { .. } | HideReason::FocusLoss => None,
+        };
+        changed
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VisibilityState {
+    Visible,
+    Hidden(HideReason),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HideReason {
+    Temporary { ignored_focus_after_hide: bool },
+    FocusLoss,
+    CopyNotice,
+}
+
+#[derive(Default)]
+struct StateEffects {
+    sync_title: bool,
+    sync_menu: bool,
+    apply_visibility: bool,
+    focus_editor: bool,
+    redraw_hidden_preview: bool,
+    schedule_hide_generation: Option<u64>,
+}
+
+enum StateAction {
+    FileLoaded { path: PathBuf },
+    FileLoadFailed(String),
+    Show,
+    HideTemporarily,
+    SetAlwaysVisible(bool),
+    SetAutoShow(bool),
+    Focused,
+    Unfocused,
+    DeferredHideOnUnfocus(u64),
+    Copied,
+    Tick,
 }
 
 #[derive(Clone)]
@@ -129,12 +345,10 @@ enum Msg {
     OpenPath(PathBuf),
     OpenSettings,
     Show,
-    Hide { manual: bool, copied_notice: bool },
+    Hide,
     Quit,
     ToggleAlwaysVisible,
     ToggleAutoShow,
-    SyncMenu,
-    Activity,
     Copied,
     Tick,
     Focused,
@@ -181,8 +395,20 @@ fn main() {
 
     let mut menu = SysMenuBar::default().with_size(0, 30);
     menu.set_frame(FrameType::FlatBox);
-    menu.add_emit("&File/Open...\t", Shortcut::Ctrl | 'o', MenuFlag::Normal, sender, Msg::Open);
-    menu.add_emit("&File/Reload\t", Shortcut::Ctrl | 'r', MenuFlag::Normal, sender, Msg::Reload);
+    menu.add_emit(
+        "&File/Open...\t",
+        Shortcut::Ctrl | 'o',
+        MenuFlag::Normal,
+        sender,
+        Msg::Open,
+    );
+    menu.add_emit(
+        "&File/Reload\t",
+        Shortcut::Ctrl | 'r',
+        MenuFlag::Normal,
+        sender,
+        Msg::Reload,
+    );
     menu.add_emit(
         "&Options/Always Visible\t",
         Shortcut::None,
@@ -204,18 +430,27 @@ fn main() {
         sender,
         Msg::OpenSettings,
     );
-    menu.add_emit("&View/Show\t", Shortcut::None, MenuFlag::Normal, sender, Msg::Show);
+    menu.add_emit(
+        "&View/Show\t",
+        Shortcut::None,
+        MenuFlag::Normal,
+        sender,
+        Msg::Show,
+    );
     menu.add_emit(
         "&View/Hide\t",
         Shortcut::None,
         MenuFlag::Normal,
         sender,
-        Msg::Hide {
-            manual: true,
-            copied_notice: false,
-        },
+        Msg::Hide,
     );
-    menu.add_emit("&File/Quit\t", Shortcut::Ctrl | 'q', MenuFlag::Normal, sender, Msg::Quit);
+    menu.add_emit(
+        "&File/Quit\t",
+        Shortcut::Ctrl | 'q',
+        MenuFlag::Normal,
+        sender,
+        Msg::Quit,
+    );
     sync_menu_state(&state, &mut menu);
     root.fixed(&menu, 30);
 
@@ -336,18 +571,6 @@ fn main() {
     settings_flex.set_margin(12);
     settings_flex.set_pad(10);
 
-    let mut inactivity_row = Flex::default().row();
-    inactivity_row.set_pad(8);
-    let mut inactivity_label = Frame::default().with_label("Hide after inactivity (s)");
-    inactivity_label.set_align(Align::Left | Align::Inside);
-    let mut inactivity_spinner = Spinner::default();
-    inactivity_spinner.set_range(0.0, 86400.0);
-    inactivity_spinner.set_step(5.0);
-    inactivity_spinner.set_value(state.borrow().inactivity_seconds as f64);
-    inactivity_row.fixed(&inactivity_label, 170);
-    inactivity_row.fixed(&inactivity_spinner, 90);
-    inactivity_row.end();
-
     let mut settings_hide_on_copy = CheckButton::default().with_label("Hide On Copy");
     settings_hide_on_copy.set_value(state.borrow().hide_on_copy);
 
@@ -366,7 +589,6 @@ fn main() {
     opacity_row.end();
     let mut settings_close = Button::default().with_label("Close");
 
-    settings_flex.fixed(&inactivity_row, 32);
     settings_flex.fixed(&settings_hide_on_copy, 28);
     settings_flex.fixed(&settings_dark, 28);
     settings_flex.fixed(&opacity_row, 32);
@@ -374,16 +596,6 @@ fn main() {
     settings_flex.end();
     settings_win.end();
     settings_win.hide();
-
-    let settings_state = state.clone();
-    inactivity_spinner.set_callback(move |spinner| {
-        let mut s = settings_state.borrow_mut();
-        s.inactivity_seconds = spinner.value().round().max(0.0) as u64;
-        reset_inactivity_deadline(&mut s);
-        s.settings_dirty = true;
-        drop(s);
-        persist_current_settings(&settings_state);
-    });
 
     let settings_state = state.clone();
     settings_hide_on_copy.set_callback(move |check| {
@@ -416,7 +628,6 @@ fn main() {
     let mut hidden_for_dark = hidden_preview.clone();
     let mut editor_for_dark = editor.clone();
     let mut settings_for_dark = settings_win.clone();
-    let mut inactivity_label_for_dark = inactivity_label.clone();
     let mut settings_hide_on_copy_for_dark = settings_hide_on_copy.clone();
     let mut settings_dark_for_dark = settings_dark.clone();
     let mut opacity_label_for_dark = opacity_label.clone();
@@ -434,7 +645,6 @@ fn main() {
             &mut editor_for_dark,
             &mut hidden_for_dark,
             &mut settings_for_dark,
-            &mut inactivity_label_for_dark,
             &mut settings_hide_on_copy_for_dark,
             &mut settings_dark_for_dark,
             &mut opacity_label_for_dark,
@@ -461,12 +671,7 @@ fn main() {
     let editor_buffer = text_buffer.clone();
     let editor_sender = sender;
     editor.handle(move |_ed, ev| match ev {
-        Event::Push | Event::Released | Event::Drag | Event::MouseWheel => {
-            editor_sender.send(Msg::Activity);
-            false
-        }
         Event::KeyDown | Event::Shortcut => {
-            editor_sender.send(Msg::Activity);
             if is_copy_event() && !editor_buffer.selection_text().is_empty() {
                 debug_log!("copy shortcut detected");
                 editor_sender.send(Msg::Copied);
@@ -490,24 +695,17 @@ fn main() {
             sender_for_focus.send(Msg::Resized);
             false
         }
-        Event::Push | Event::Released | Event::Drag | Event::MouseWheel | Event::KeyDown => {
-            sender_for_focus.send(Msg::Activity);
-            false
-        }
         _ => false,
     });
 
     let state_for_tick = state.clone();
     let sender_for_tick = sender;
-    app::add_timeout3(TICK_SECONDS, move |handle| {
-        let should_tick = {
-            let state = state_for_tick.borrow();
-            state.inactivity_deadline.is_some() || state.copied_notice_until.is_some()
-        };
+    app::add_timeout3(NOTICE_TICK_SECONDS, move |handle| {
+        let should_tick = state_for_tick.borrow().copied_notice_until.is_some();
         if should_tick {
             sender_for_tick.send(Msg::Tick);
         }
-        app::repeat_timeout3(TICK_SECONDS, handle);
+        app::repeat_timeout3(NOTICE_TICK_SECONDS, handle);
     });
 
     let startup_file = std::env::args_os()
@@ -518,18 +716,12 @@ fn main() {
     if let Some(path) = load_last {
         load_file_into_state(&state, path, &mut text_buffer);
     }
-    {
-        let mut s = state.borrow_mut();
-        reset_inactivity_deadline(&mut s);
-    }
-
     apply_theme(
         state.borrow().dark_mode,
         &mut wind,
         &mut editor,
         &mut hidden_preview,
         &mut settings_win,
-        &mut inactivity_label,
         &mut settings_hide_on_copy,
         &mut settings_dark,
         &mut opacity_label,
@@ -548,37 +740,27 @@ fn main() {
         &mut hidden_preview,
     );
     let _ = editor.take_focus();
-    let startup_sender = sender;
-    app::add_timeout3(0.0, move |_| {
-        startup_sender.send(Msg::SyncMenu);
-    });
 
     while app.wait() {
         if let Some(msg) = receiver.recv() {
-            let mut should_apply_state = true;
-            let mut should_sync_title = false;
-            let mut should_sync_menu = false;
+            let mut effects = StateEffects::default();
             match msg {
                 Msg::Open => {
                     if let Some(path) = choose_file() {
-                        load_file_into_state(&state, path, &mut text_buffer);
-                        should_sync_title = true;
+                        effects = load_file_into_state(&state, path, &mut text_buffer);
                     }
                 }
                 Msg::OpenPath(path) => {
-                    load_file_into_state(&state, path, &mut text_buffer);
-                    should_sync_title = true;
+                    effects = load_file_into_state(&state, path, &mut text_buffer);
                 }
                 Msg::Reload => {
                     let current_file = state.borrow().current_file.clone();
                     if let Some(path) = current_file {
-                        load_file_into_state(&state, path, &mut text_buffer);
-                        should_sync_title = true;
+                        effects = load_file_into_state(&state, path, &mut text_buffer);
                     }
                 }
                 Msg::OpenSettings => {
                     let s = state.borrow();
-                    inactivity_spinner.set_value(s.inactivity_seconds as f64);
                     settings_hide_on_copy.set_value(s.hide_on_copy);
                     settings_dark.set_value(s.dark_mode);
                     opacity_spinner.set_value((s.opacity * 100.0).round());
@@ -588,159 +770,76 @@ fn main() {
                 }
                 Msg::Show => {
                     debug_log!("show requested");
-                    show_now(&state);
-                    should_sync_menu = true;
+                    effects = state.borrow_mut().apply(StateAction::Show);
                 }
 
-                Msg::Hide {
-                    manual,
-                    copied_notice,
-                } => {
-                    debug_log!("hide requested manual={manual} copied_notice={copied_notice}");
-                    hide_now(&state, manual, copied_notice);
-                    should_sync_menu = true;
+                Msg::Hide => {
+                    debug_log!("temporary hide requested");
+                    effects = state.borrow_mut().apply(StateAction::HideTemporarily);
                 }
                 Msg::Quit => app.quit(),
                 Msg::ToggleAlwaysVisible => {
                     let enabled = !state.borrow().always_visible;
-                    set_always_visible(&state, enabled);
                     debug_log!("always_visible={enabled}");
-                    should_sync_menu = true;
+                    effects = state
+                        .borrow_mut()
+                        .apply(StateAction::SetAlwaysVisible(enabled));
                 }
 
                 Msg::ToggleAutoShow => {
                     let enabled = !state.borrow().auto_show;
-                    set_auto_show(&state, enabled);
                     debug_log!("auto_show={enabled}");
-                    should_sync_menu = true;
+                    effects = state.borrow_mut().apply(StateAction::SetAutoShow(enabled));
                 }
                 Msg::Tick => {
-                    let mut should_hide = false;
-                    {
-                        let mut s = state.borrow_mut();
-                        if let Some(deadline) = s.inactivity_deadline {
-                            if Instant::now() >= deadline && !s.always_visible && s.visible {
-                                should_hide = true;
-                            }
-                        }
-                        if let Some(deadline) = s.copied_notice_until {
-                            if Instant::now() >= deadline {
-                                s.copied_notice_until = None;
-                                hidden_preview.redraw();
-                            }
-                        }
-                    }
-                    if should_hide {
-                        hide_now(&state, false, false);
-                    }
+                    effects = state.borrow_mut().apply(StateAction::Tick);
                 }
                 Msg::Focused => {
-                    {
-                        let mut s = state.borrow_mut();
-                        s.focus_generation = s.focus_generation.wrapping_add(1);
-                    }
-                    let already_visible = state.borrow().visible;
-
-                    if already_visible {
-                        let mut s = state.borrow_mut();
-                        reset_inactivity_deadline(&mut s);
-                        should_apply_state = false;
-                    } else {
-                        let should_show = {
-                            let mut s = state.borrow_mut();
-                            let should_show = should_auto_show_on_focus(&s);
-                            debug_log!(
-                                "focused should_show={} manually_hidden={} auto_show={} always_visible={}",
-                                should_show,
-                                s.manually_hidden,
-                                s.auto_show,
-                                s.always_visible
-                            );
-                            if !should_show {
-                                reset_inactivity_deadline(&mut s);
-                            }
-                            should_show
-                        };
-                        if should_show {
-                            show_now(&state);
-                        }
-                    }
+                    let snapshot = state.borrow();
+                    debug_log!(
+                        "focused visibility={:?} auto_show={} always_visible={}",
+                        snapshot.visibility,
+                        snapshot.auto_show,
+                        snapshot.always_visible
+                    );
+                    drop(snapshot);
+                    effects = state.borrow_mut().apply(StateAction::Focused);
                 }
                 Msg::Unfocused => {
                     debug_log!("unfocused");
-                    let hide_generation = {
-                        let mut s = state.borrow_mut();
-                        s.inactivity_deadline = None;
-                        s.focus_generation = s.focus_generation.wrapping_add(1);
-                        s.focus_generation
-                    };
-                    let deferred_sender = sender;
-                    app::add_timeout3(FOCUS_HIDE_DELAY_SECONDS, move |_| {
-                        deferred_sender.send(Msg::DeferredHideOnUnfocus(hide_generation));
-                    });
-                    should_apply_state = false;
+                    effects = state.borrow_mut().apply(StateAction::Unfocused);
                 }
                 Msg::DeferredHideOnUnfocus(expected_generation) => {
-                    let should_hide = {
-                        let s = state.borrow();
-                        s.focus_generation == expected_generation && !s.always_visible
-                    };
-                    if should_hide {
-                        hide_now(&state, false, false);
-                    } else {
-                        should_apply_state = false;
-                    }
+                    effects = state
+                        .borrow_mut()
+                        .apply(StateAction::DeferredHideOnUnfocus(expected_generation));
                 }
-                Msg::Activity => {
-                    let mut s = state.borrow_mut();
-                    reset_inactivity_deadline(&mut s);
-                    should_apply_state = false;
-                }
-                Msg::Copied => {
-                    let should_hide = {
-                        let mut s = state.borrow_mut();
-                        let should_hide = s.hide_on_copy && !s.always_visible && s.visible;
-                        s.copy_hide_generation = s.copy_hide_generation.wrapping_add(1);
-                        should_hide
-                    };
-
-                    debug_log!("copied should_hide={should_hide}");
-
-                    if should_hide {
-                        hide_now(&state, false, true);
-                        should_sync_menu = true;
-                    } else {
-                        should_apply_state = false;
-                    }
-                }
+                Msg::Copied => effects = state.borrow_mut().apply(StateAction::Copied),
                 Msg::Resized => {
                     root.recalc();
                     root.redraw();
                     visible_group.redraw();
                     hidden_group.redraw();
                     hidden_preview.redraw();
-                    should_apply_state = false;
                 }
-                Msg::SyncMenu => {
-                    debug_log!(
-                        "syncing menu from state always_visible={} auto_show={}",
-                        state.borrow().always_visible,
-                        state.borrow().auto_show
-                    );
-                    should_sync_menu = true;
-                    should_apply_state = false;
-                }
+            }
+
+            if let Some(hide_generation) = effects.schedule_hide_generation {
+                let deferred_sender = sender;
+                app::add_timeout3(FOCUS_HIDE_DELAY_SECONDS, move |_| {
+                    deferred_sender.send(Msg::DeferredHideOnUnfocus(hide_generation));
+                });
             }
 
             capture_window_state(&state, &wind);
             sync_settings(&state);
-            if should_sync_title {
+            if effects.sync_title {
                 sync_window_title(&state, &mut wind);
             }
-            if should_sync_menu {
+            if effects.sync_menu {
                 sync_menu_state(&state, &mut menu);
             }
-            if should_apply_state {
+            if effects.apply_visibility {
                 apply_visibility_state(
                     &state,
                     &mut root,
@@ -748,9 +847,12 @@ fn main() {
                     &mut hidden_group,
                     &mut hidden_preview,
                 );
-                if state.borrow().visible {
-                    let _ = editor.take_focus();
-                }
+            }
+            if effects.redraw_hidden_preview {
+                hidden_preview.redraw();
+            }
+            if effects.focus_editor && state.borrow().is_visible() {
+                let _ = editor.take_focus();
             }
         }
     }
@@ -783,94 +885,17 @@ fn is_copy_event() -> bool {
     has_modifier && (key == Key::from_char('c') || key == Key::from_char('C'))
 }
 
-fn reset_inactivity_deadline(state: &mut AppState) {
-    if state.inactivity_seconds == 0 || !state.visible {
-        state.inactivity_deadline = None;
-    } else {
-        state.inactivity_deadline =
-            Some(Instant::now() + std::time::Duration::from_secs(state.inactivity_seconds));
-    }
-}
-
-fn should_auto_show_on_focus(state: &AppState) -> bool {
-    if state.manually_hidden {
-        return false;
-    }
-
-    if state
-        .copied_notice_until
-        .is_some_and(|deadline| Instant::now() < deadline)
-    {
-        return false;
-    }
-
-    state.auto_show || state.always_visible
-}
-
-fn show_now(state: &Rc<RefCell<AppState>>) {
-    let mut s = state.borrow_mut();
-    s.copy_hide_generation = s.copy_hide_generation.wrapping_add(1);
-    s.visible = true;
-    s.manually_hidden = false;
-    s.copied_notice_until = None;
-    reset_inactivity_deadline(&mut s);
-}
-
-fn hide_now(state: &Rc<RefCell<AppState>>, manual: bool, copied_notice: bool) {
-    let mut s = state.borrow_mut();
-    if s.always_visible {
-        return;
-    }
-
-    if !s.visible && !manual && !copied_notice {
-        return;
-    }
-
-    s.visible = false;
-    s.manually_hidden = s.manually_hidden || manual;
-    s.inactivity_deadline = None;
-
-    if copied_notice {
-        s.copied_notice_until =
-            Some(Instant::now() + std::time::Duration::from_secs(1));
-    }
-}
-
-fn set_always_visible(state: &Rc<RefCell<AppState>>, enabled: bool) {
-    {
-        let mut s = state.borrow_mut();
-        s.always_visible = enabled;
-        s.settings_dirty = true;
-    }
-    if enabled {
-        show_now(state);
-    }
-}
-
-fn set_auto_show(state: &Rc<RefCell<AppState>>, enabled: bool) {
-    let mut s = state.borrow_mut();
-    s.auto_show = enabled;
-    s.settings_dirty = true;
-}
-
-fn load_file_into_state(state: &Rc<RefCell<AppState>>, path: PathBuf, buffer: &mut TextBuffer) {
+fn load_file_into_state(
+    state: &Rc<RefCell<AppState>>,
+    path: PathBuf,
+    buffer: &mut TextBuffer,
+) -> StateEffects {
     match read_document_text(&path) {
         Ok(text) => {
             buffer.set_text(&text);
-            let mut s = state.borrow_mut();
-            s.current_file = Some(path.clone());
-            s.settings.last_file = Some(path);
-            s.text = text;
-            s.visible = true;
-            s.manually_hidden = false;
-            reset_inactivity_deadline(&mut s);
-            s.last_error = None;
-            s.settings_dirty = true;
+            state.borrow_mut().apply(StateAction::FileLoaded { path })
         }
-        Err(err) => {
-            let mut s = state.borrow_mut();
-            s.last_error = Some(err);
-        }
+        Err(err) => state.borrow_mut().apply(StateAction::FileLoadFailed(err)),
     }
 }
 
@@ -883,7 +908,7 @@ fn apply_visibility_state(
 ) {
     let visible = {
         let s = state.borrow();
-        s.visible
+        s.is_visible()
     };
 
     if visible {
@@ -958,7 +983,6 @@ fn sync_settings(state: &Rc<RefCell<AppState>>) {
     s.settings.always_visible = s.always_visible;
     s.settings.auto_show = s.auto_show;
     s.settings.hide_on_copy = s.hide_on_copy;
-    s.settings.inactivity_seconds = s.inactivity_seconds;
     s.settings.dark_mode = s.dark_mode;
     s.settings.opacity = s.opacity;
     save_saved_state(&s.settings);
@@ -970,7 +994,6 @@ fn persist_current_settings(state: &Rc<RefCell<AppState>>) {
     s.settings.always_visible = s.always_visible;
     s.settings.auto_show = s.auto_show;
     s.settings.hide_on_copy = s.hide_on_copy;
-    s.settings.inactivity_seconds = s.inactivity_seconds;
     s.settings.dark_mode = s.dark_mode;
     s.settings.opacity = s.opacity;
     save_saved_state(&s.settings);
@@ -1203,7 +1226,6 @@ fn apply_theme(
     editor: &mut TextDisplay,
     hidden_preview: &mut Frame,
     settings_win: &mut Window,
-    inactivity_label: &mut Frame,
     settings_hide_on_copy: &mut CheckButton,
     settings_dark: &mut CheckButton,
     opacity_label: &mut Frame,
@@ -1216,7 +1238,6 @@ fn apply_theme(
         editor.set_color(Color::from_rgb(18, 20, 23));
         editor.set_text_color(Color::from_rgb(229, 232, 236));
         hidden_preview.set_color(Color::from_rgb(30, 33, 37));
-        inactivity_label.set_label_color(Color::from_rgb(229, 232, 236));
         opacity_label.set_label_color(Color::from_rgb(229, 232, 236));
         settings_hide_on_copy.set_label_color(Color::from_rgb(229, 232, 236));
         settings_dark.set_label_color(Color::from_rgb(229, 232, 236));
@@ -1230,7 +1251,6 @@ fn apply_theme(
         editor.set_color(Color::White);
         editor.set_text_color(Color::Black);
         hidden_preview.set_color(Color::from_rgb(244, 247, 249));
-        inactivity_label.set_label_color(Color::Black);
         opacity_label.set_label_color(Color::Black);
         settings_hide_on_copy.set_label_color(Color::Black);
         settings_dark.set_label_color(Color::Black);

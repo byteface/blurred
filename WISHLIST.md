@@ -1,12 +1,8 @@
-Hide after inactivity
-
-
 - configurable Show / hide key
 - spacebar toggle behavior
 - dynamic Show (...) / Hide (...) button labels
 
 the extra Settings controls for:
-- inactivity timeout
 - toggle key
 
 

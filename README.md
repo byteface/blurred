@@ -31,7 +31,6 @@ https://gist.github.com/byteface/9ca8c3d885d08284bfaebef6256591b2
 - reveal on focus
 - `Always Visible` toggle
 - `Auto Show On Focus` toggle
-- adjustable hide delay
 - dark mode
 - window opacity control
 - remembers last file and window position
