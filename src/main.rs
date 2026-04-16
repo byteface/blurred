@@ -31,7 +31,6 @@ const FOCUS_HIDE_DELAY_SECONDS: f64 = 0.075;
 const DEFAULT_OPACITY: f64 = 1.0;
 const DEFAULT_WINDOW_W: i32 = 500;
 const DEFAULT_WINDOW_H: i32 = 500;
-const LEGACY_DEFAULT_WINDOW_H: i32 = 800;
 const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
 const BLURRY_PNG: &[u8] = include_bytes!("../blurry.png");
 
@@ -346,6 +345,7 @@ enum Msg {
     OpenSettings,
     Show,
     Hide,
+    ToggleVisibility,
     Quit,
     ToggleAlwaysVisible,
     ToggleAutoShow,
@@ -469,6 +469,18 @@ fn main() {
     editor.wrap_mode(WrapMode::AtBounds, 0);
     let mut text_buffer = TextBuffer::default();
     editor.set_buffer(Some(text_buffer.clone()));
+    let mut hide_button_row = Flex::default().row();
+    hide_button_row.set_margin(12);
+    hide_button_row.set_pad(0);
+    let visible_left_spacer = Frame::default();
+    let mut hide_btn = Button::default().with_label("Hide");
+    hide_btn.clear_visible_focus();
+    let visible_right_spacer = Frame::default();
+    hide_button_row.fixed(&visible_left_spacer, 0);
+    hide_button_row.fixed(&hide_btn, 100);
+    hide_button_row.fixed(&visible_right_spacer, 0);
+    hide_button_row.end();
+    visible_flex.fixed(&hide_button_row, 56);
     visible_flex.end();
     visible_group.end();
 
@@ -502,6 +514,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     app::raw_open_callback(Some(handle_open_file));
 
+    hide_btn.emit(sender, Msg::Hide);
     show_btn.emit(sender, Msg::Show);
 
     let blurred_image = load_blurred_image();
@@ -672,6 +685,10 @@ fn main() {
     let editor_sender = sender;
     editor.handle(move |_ed, ev| match ev {
         Event::KeyDown | Event::Shortcut => {
+            if is_toggle_visibility_event() {
+                editor_sender.send(Msg::ToggleVisibility);
+                return true;
+            }
             if is_copy_event() && !editor_buffer.selection_text().is_empty() {
                 debug_log!("copy shortcut detected");
                 editor_sender.send(Msg::Copied);
@@ -681,6 +698,8 @@ fn main() {
         _ => false,
     });
 
+    let resize_pending = Rc::new(RefCell::new(false));
+    let resize_pending_for_handle = resize_pending.clone();
     let sender_for_focus = sender;
     wind.handle(move |_w, ev| match ev {
         Event::Focus => {
@@ -692,8 +711,20 @@ fn main() {
             false
         }
         Event::Resize => {
-            sender_for_focus.send(Msg::Resized);
+            let mut pending = resize_pending_for_handle.borrow_mut();
+            if !*pending {
+                *pending = true;
+                sender_for_focus.send(Msg::Resized);
+            }
             false
+        }
+        Event::KeyDown | Event::Shortcut => {
+            if is_toggle_visibility_event() {
+                sender_for_focus.send(Msg::ToggleVisibility);
+                true
+            } else {
+                false
+            }
         }
         _ => false,
     });
@@ -777,6 +808,13 @@ fn main() {
                     debug_log!("temporary hide requested");
                     effects = state.borrow_mut().apply(StateAction::HideTemporarily);
                 }
+                Msg::ToggleVisibility => {
+                    effects = if state.borrow().is_visible() {
+                        state.borrow_mut().apply(StateAction::HideTemporarily)
+                    } else {
+                        state.borrow_mut().apply(StateAction::Show)
+                    };
+                }
                 Msg::Quit => app.quit(),
                 Msg::ToggleAlwaysVisible => {
                     let enabled = !state.borrow().always_visible;
@@ -816,11 +854,9 @@ fn main() {
                 }
                 Msg::Copied => effects = state.borrow_mut().apply(StateAction::Copied),
                 Msg::Resized => {
-                    root.recalc();
-                    root.redraw();
-                    visible_group.redraw();
-                    hidden_group.redraw();
-                    hidden_preview.redraw();
+                    *resize_pending.borrow_mut() = false;
+                    effects.apply_visibility = true;
+                    effects.redraw_hidden_preview = true;
                 }
             }
 
@@ -885,6 +921,14 @@ fn is_copy_event() -> bool {
     has_modifier && (key == Key::from_char('c') || key == Key::from_char('C'))
 }
 
+fn is_toggle_visibility_event() -> bool {
+    let state = app::event_state();
+    let has_modifier = state.contains(Shortcut::Ctrl)
+        || state.contains(Shortcut::Meta)
+        || state.contains(Shortcut::Alt);
+    !has_modifier && app::event_key() == Key::from_char(' ')
+}
+
 fn load_file_into_state(
     state: &Rc<RefCell<AppState>>,
     path: PathBuf,
@@ -912,20 +956,16 @@ fn apply_visibility_state(
     };
 
     if visible {
-        if !visible_group.visible() || hidden_group.visible() {
-            hidden_group.hide();
-            visible_group.show();
-            root.recalc();
-            root.redraw();
-        }
+        hidden_group.hide();
+        visible_group.show();
+        root.recalc();
+        root.redraw();
         visible_group.redraw();
     } else {
-        if visible_group.visible() || !hidden_group.visible() {
-            visible_group.hide();
-            hidden_group.show();
-            root.recalc();
-            root.redraw();
-        }
+        visible_group.hide();
+        hidden_group.show();
+        root.recalc();
+        root.redraw();
         hidden_group.redraw();
         hidden_preview.redraw();
     }
@@ -1267,16 +1307,12 @@ fn apply_theme(
 }
 
 fn initial_window_rect(settings: &SavedState) -> (i32, i32, i32, i32) {
-    let width = settings.window_w;
-    let height = if settings.window_h == LEGACY_DEFAULT_WINDOW_H
-        && settings.window_w == DEFAULT_WINDOW_W
-        && settings.last_file.is_none()
-    {
-        DEFAULT_WINDOW_H
-    } else {
-        settings.window_h
-    };
-    (settings.window_x, settings.window_y, width, height)
+    (
+        settings.window_x,
+        settings.window_y,
+        settings.window_w,
+        settings.window_h,
+    )
 }
 
 fn load_saved_state() -> SavedState {
