@@ -34,7 +34,6 @@ const DEFAULT_OPACITY: f64 = 1.0;
 const DEFAULT_WINDOW_W: i32 = 500;
 const DEFAULT_WINDOW_H: i32 = 500;
 const MAX_RECENT_FILES: usize = 8;
-const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
 const BLURRY_PNG: &[u8] = include_bytes!("../blurry.png");
 const APP_SCHEME: Option<app::Scheme> = None;
 
@@ -390,9 +389,6 @@ fn main() {
     wind.make_resizable(true);
     wind.set_color(Color::White);
     wind.set_opacity(initial.opacity);
-    if let Some(icon) = load_logo_image() {
-        wind.set_icon(Some(icon));
-    }
 
     let mut root = Flex::default_fill().column();
     root.set_margin(0);
@@ -831,10 +827,6 @@ fn choose_file() -> Option<PathBuf> {
     }
 }
 
-fn load_logo_image() -> Option<PngImage> {
-    PngImage::from_data(LOGO_PNG).ok()
-}
-
 fn load_blurred_image() -> Option<PngImage> {
     PngImage::from_data(BLURRY_PNG).ok()
 }
@@ -966,17 +958,29 @@ fn rebuild_menu(state: &Rc<RefCell<AppState>>, menu: &mut SysMenuBar, sender: ap
         sender,
         Msg::Quit,
     );
+
+    let always_visible_flags = if always_visible {
+        MenuFlag::Toggle | MenuFlag::Value
+    } else {
+        MenuFlag::Toggle
+    };
     menu.add_emit(
         "&Options/Always Visible\t",
         Shortcut::None,
-        MenuFlag::Toggle,
+        always_visible_flags,
         sender,
         Msg::ToggleAlwaysVisible,
     );
+
+    let auto_show_flags = if auto_show {
+        MenuFlag::Toggle | MenuFlag::Value
+    } else {
+        MenuFlag::Toggle
+    };
     menu.add_emit(
         "&Options/Auto Show\t",
         Shortcut::None,
-        MenuFlag::Toggle,
+        auto_show_flags,
         sender,
         Msg::ToggleAutoShow,
     );
@@ -1002,8 +1006,6 @@ fn rebuild_menu(state: &Rc<RefCell<AppState>>, menu: &mut SysMenuBar, sender: ap
         Msg::Hide,
     );
 
-    set_menu_toggle_by_label(menu, "Always Visible", always_visible);
-    set_menu_toggle_by_label(menu, "Auto Show", auto_show);
     menu.redraw();
 }
 
@@ -1031,24 +1033,6 @@ fn sanitize_menu_label(label: &str) -> String {
         .replace('&', "&&")
         .replace('/', " / ")
         .replace('\\', " ")
-}
-
-fn set_menu_toggle_by_label(menu: &mut SysMenuBar, target: &str, enabled: bool) {
-    for i in 0..menu.size() {
-        if let Some(mut item) = menu.at(i) {
-            if let Some(label) = item.label() {
-                let clean = label.replace('&', "").replace('\t', "");
-                if clean == target {
-                    if enabled {
-                        item.set();
-                    } else {
-                        item.clear();
-                    }
-                    break;
-                }
-            }
-        }
-    }
 }
 
 fn sync_settings(state: &Rc<RefCell<AppState>>) {
