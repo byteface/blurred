@@ -42,6 +42,8 @@ At the time it was cobbled together out of necessity, but I ended up using it fo
 
 ## Rust Build
 
+Visit the releases page to download a ready made app.
+
 Check the `Makefile` to build for your platform.
 
 ```bash
