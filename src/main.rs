@@ -419,6 +419,8 @@ fn main() {
     editor.set_color(Color::White);
     editor.set_readonly(true);
     editor.set_wrap(true);
+    editor.clear_visible_focus();
+    editor.set_cursor_color(Color::White);
     let mut hide_button_row = Flex::default().row();
     hide_button_row.set_margin(12);
     hide_button_row.set_pad(0);
@@ -632,7 +634,6 @@ fn main() {
     }
 
     let editor_sender = sender;
-    let editor_for_events = editor.clone();
     editor.handle(move |_ed, ev| match ev {
         Event::Push if app::event_mouse_button() == app::MouseButton::Right => true,
         Event::Released if app::event_mouse_button() == app::MouseButton::Right => true,
@@ -640,9 +641,6 @@ fn main() {
             if is_toggle_visibility_event() {
                 editor_sender.send(Msg::ToggleVisibility);
                 return true;
-            }
-            if is_copy_event() && editor_for_events.position() != editor_for_events.mark() {
-                editor_sender.send(Msg::Copied);
             }
             false
         }
@@ -652,6 +650,7 @@ fn main() {
     let resize_pending = Rc::new(RefCell::new(false));
     let resize_pending_for_handle = resize_pending.clone();
     let sender_for_focus = sender;
+    let mut editor_for_shortcuts = editor.clone();
     wind.handle(move |_w, ev| match ev {
         Event::Focus => {
             sender_for_focus.send(Msg::Focused);
@@ -672,6 +671,12 @@ fn main() {
         Event::KeyDown | Event::Shortcut => {
             if is_toggle_visibility_event() {
                 sender_for_focus.send(Msg::ToggleVisibility);
+                true
+            } else if is_copy_event()
+                && editor_for_shortcuts.position() != editor_for_shortcuts.mark()
+            {
+                let _ = editor_for_shortcuts.copy();
+                sender_for_focus.send(Msg::Copied);
                 true
             } else {
                 false
@@ -721,7 +726,7 @@ fn main() {
         &mut hidden_group,
         &mut hidden_preview,
     );
-    let _ = editor.take_focus();
+    let _ = wind.take_focus();
 
     while app.wait() {
         if let Some(msg) = receiver.recv() {
@@ -809,7 +814,7 @@ fn main() {
                 hidden_preview.redraw();
             }
             if effects.focus_editor && state.borrow().is_visible() {
-                let _ = editor.take_focus();
+                let _ = wind.take_focus();
             }
         }
     }
@@ -1138,6 +1143,7 @@ fn apply_theme(
         settings_win.set_color(Color::from_rgb(32, 35, 39));
         editor.set_color(Color::from_rgb(18, 20, 23));
         editor.set_text_color(Color::from_rgb(229, 232, 236));
+        editor.set_cursor_color(Color::from_rgb(18, 20, 23));
         hidden_preview.set_color(Color::from_rgb(30, 33, 37));
         opacity_label.set_label_color(Color::from_rgb(229, 232, 236));
         settings_hide_on_copy.set_label_color(Color::from_rgb(229, 232, 236));
@@ -1151,6 +1157,7 @@ fn apply_theme(
         settings_win.set_color(Color::from_rgb(246, 247, 249));
         editor.set_color(Color::White);
         editor.set_text_color(Color::Black);
+        editor.set_cursor_color(Color::White);
         hidden_preview.set_color(Color::from_rgb(244, 247, 249));
         opacity_label.set_label_color(Color::Black);
         settings_hide_on_copy.set_label_color(Color::Black);
@@ -1210,4 +1217,236 @@ fn save_saved_state(state: &SavedState) {
 fn settings_path() -> Option<PathBuf> {
     let dirs = ProjectDirs::from("com", "byteface", "blurred")?;
     Some(dirs.config_dir().join("settings.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn test_state() -> AppState {
+        let settings = SavedState::default();
+        AppState {
+            current_file: settings.last_file.clone(),
+            visibility: VisibilityState::Visible,
+            always_visible: settings.always_visible,
+            auto_show: settings.auto_show,
+            hide_on_copy: settings.hide_on_copy,
+            dark_mode: settings.dark_mode,
+            opacity: settings.opacity,
+            copied_notice_until: None,
+            last_error: None,
+            settings_dirty: false,
+            settings,
+            focus_generation: 0,
+        }
+    }
+
+    #[test]
+    fn file_loaded_updates_last_file_recent_files_and_effects() {
+        let mut state = test_state();
+        let first = PathBuf::from("/tmp/one.txt");
+        let second = PathBuf::from("/tmp/two.txt");
+
+        state.apply(StateAction::FileLoaded {
+            path: first.clone(),
+        });
+        let effects = state.apply(StateAction::FileLoaded {
+            path: second.clone(),
+        });
+
+        assert_eq!(state.current_file, Some(second.clone()));
+        assert_eq!(state.settings.last_file, Some(second.clone()));
+        assert_eq!(state.settings.recent_files, vec![second, first]);
+        assert!(effects.sync_title);
+        assert!(effects.sync_menu);
+        assert!(effects.apply_visibility);
+        assert!(effects.focus_editor);
+    }
+
+    #[test]
+    fn recent_files_are_deduped_and_truncated() {
+        let mut state = test_state();
+
+        for index in 0..(MAX_RECENT_FILES + 2) {
+            state.apply(StateAction::FileLoaded {
+                path: PathBuf::from(format!("/tmp/file-{index}.txt")),
+            });
+        }
+
+        state.apply(StateAction::FileLoaded {
+            path: PathBuf::from("/tmp/file-3.txt"),
+        });
+
+        assert_eq!(state.settings.recent_files.len(), MAX_RECENT_FILES);
+        assert_eq!(
+            state.settings.recent_files.first(),
+            Some(&PathBuf::from("/tmp/file-3.txt"))
+        );
+        assert_eq!(
+            state
+                .settings
+                .recent_files
+                .iter()
+                .filter(|path| **path == PathBuf::from("/tmp/file-3.txt"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn temporary_hide_ignores_first_focus_then_allows_focus_loss_cycle() {
+        let mut state = test_state();
+
+        state.apply(StateAction::HideTemporarily);
+        assert_eq!(
+            state.visibility,
+            VisibilityState::Hidden(HideReason::Temporary {
+                ignored_focus_after_hide: false
+            })
+        );
+
+        let focus_effects = state.apply(StateAction::Focused);
+        assert_eq!(
+            state.visibility,
+            VisibilityState::Hidden(HideReason::Temporary {
+                ignored_focus_after_hide: true
+            })
+        );
+        assert!(!focus_effects.apply_visibility);
+
+        let unfocus_effects = state.apply(StateAction::Unfocused);
+        assert_eq!(
+            state.visibility,
+            VisibilityState::Hidden(HideReason::FocusLoss)
+        );
+        assert_eq!(unfocus_effects.schedule_hide_generation, None);
+
+        let refocus_effects = state.apply(StateAction::Focused);
+        assert_eq!(state.visibility, VisibilityState::Visible);
+        assert!(refocus_effects.apply_visibility);
+        assert!(refocus_effects.focus_editor);
+    }
+
+    #[test]
+    fn auto_show_disabled_keeps_window_hidden_on_focus() {
+        let mut state = test_state();
+        state.apply(StateAction::SetAutoShow(false));
+        state.apply(StateAction::HideTemporarily);
+        state.apply(StateAction::Focused);
+        state.apply(StateAction::Unfocused);
+
+        let effects = state.apply(StateAction::Focused);
+
+        assert_eq!(
+            state.visibility,
+            VisibilityState::Hidden(HideReason::FocusLoss)
+        );
+        assert!(!effects.apply_visibility);
+    }
+
+    #[test]
+    fn unfocus_while_visible_schedules_deferred_hide() {
+        let mut state = test_state();
+
+        let effects = state.apply(StateAction::Unfocused);
+
+        assert_eq!(effects.schedule_hide_generation, Some(1));
+        assert_eq!(state.focus_generation, 1);
+    }
+
+    #[test]
+    fn deferred_hide_only_applies_for_matching_generation() {
+        let mut state = test_state();
+        let scheduled = state.apply(StateAction::Unfocused).schedule_hide_generation;
+
+        let wrong_generation_effects = state.apply(StateAction::DeferredHideOnUnfocus(999));
+        assert_eq!(state.visibility, VisibilityState::Visible);
+        assert!(!wrong_generation_effects.apply_visibility);
+
+        let correct_generation_effects =
+            state.apply(StateAction::DeferredHideOnUnfocus(scheduled.unwrap()));
+        assert_eq!(
+            state.visibility,
+            VisibilityState::Hidden(HideReason::FocusLoss)
+        );
+        assert!(correct_generation_effects.apply_visibility);
+    }
+
+    #[test]
+    fn copy_hides_with_notice_and_tick_clears_notice() {
+        let mut state = test_state();
+
+        let copy_effects = state.apply(StateAction::Copied);
+        assert_eq!(
+            state.visibility,
+            VisibilityState::Hidden(HideReason::CopyNotice)
+        );
+        assert!(state.copied_notice_until.is_some());
+        assert!(copy_effects.apply_visibility);
+        assert!(copy_effects.redraw_hidden_preview);
+
+        state.copied_notice_until = Some(Instant::now() - Duration::from_millis(10));
+        let tick_effects = state.apply(StateAction::Tick);
+        assert_eq!(state.copied_notice_until, None);
+        assert!(tick_effects.redraw_hidden_preview);
+    }
+
+    #[test]
+    fn copy_does_not_hide_when_hide_on_copy_disabled() {
+        let mut state = test_state();
+        state.hide_on_copy = false;
+
+        let effects = state.apply(StateAction::Copied);
+
+        assert_eq!(state.visibility, VisibilityState::Visible);
+        assert!(state.copied_notice_until.is_none());
+        assert!(!effects.apply_visibility);
+    }
+
+    #[test]
+    fn show_clears_copy_notice_and_restores_visibility() {
+        let mut state = test_state();
+        state.apply(StateAction::Copied);
+
+        let effects = state.apply(StateAction::Show);
+
+        assert_eq!(state.visibility, VisibilityState::Visible);
+        assert_eq!(state.copied_notice_until, None);
+        assert!(effects.apply_visibility);
+        assert!(effects.focus_editor);
+    }
+
+    #[test]
+    fn always_visible_forces_show_and_blocks_hide() {
+        let mut state = test_state();
+        state.apply(StateAction::HideTemporarily);
+
+        let effects = state.apply(StateAction::SetAlwaysVisible(true));
+
+        assert!(state.always_visible);
+        assert_eq!(state.visibility, VisibilityState::Visible);
+        assert!(effects.sync_menu);
+        assert!(effects.apply_visibility);
+        assert!(effects.focus_editor);
+
+        let hide_effects = state.apply(StateAction::HideTemporarily);
+        assert_eq!(state.visibility, VisibilityState::Visible);
+        assert!(!hide_effects.apply_visibility);
+    }
+
+    #[test]
+    fn toggle_actions_mark_settings_dirty() {
+        let mut state = test_state();
+
+        let always_effects = state.apply(StateAction::SetAlwaysVisible(true));
+        assert!(state.settings_dirty);
+        assert!(always_effects.sync_menu);
+
+        state.settings_dirty = false;
+        let auto_effects = state.apply(StateAction::SetAutoShow(false));
+        assert!(state.settings_dirty);
+        assert!(auto_effects.sync_menu);
+        assert!(!state.auto_show);
+    }
 }
