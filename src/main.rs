@@ -1,9 +1,11 @@
 mod document;
 
 use std::cell::RefCell;
+#[cfg(target_os = "macos")]
 use std::ffi::CStr;
 use std::fs;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -11,6 +13,8 @@ use std::time::Instant;
 
 use directories::ProjectDirs;
 use document::read_document_text;
+#[cfg(target_os = "macos")]
+use fltk::menu::{MacAppMenu, MenuItem, WindowMenuStyle};
 use fltk::{
     app,
     button::{Button, CheckButton},
@@ -20,7 +24,7 @@ use fltk::{
     frame::Frame,
     group::{Flex, Group},
     image::PngImage,
-    menu::{MacAppMenu, MenuFlag, MenuItem, SysMenuBar, WindowMenuStyle},
+    menu::{MenuFlag, SysMenuBar},
     misc::Spinner,
     output::MultilineOutput,
     prelude::*,
@@ -1071,29 +1075,13 @@ fn toggle_visibility(state: &Rc<RefCell<AppState>>) -> StateEffects {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn open_external_url(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = Command::new("open");
-        c.arg(url);
-        c
-    };
-
-    #[cfg(target_os = "linux")]
-    let mut cmd = {
-        let mut c = Command::new("xdg-open");
-        c.arg(url);
-        c
-    };
-
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = Command::new("cmd");
-        c.args(["/C", "start", "", url]);
-        c
-    };
-
-    cmd.spawn().map(|_| ()).map_err(|err| err.to_string())
+    Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| err.to_string())
 }
 
 #[cfg(target_os = "macos")]
