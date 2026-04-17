@@ -23,6 +23,9 @@ This Rust app is inspired by this tiny python prototype:
 
 https://gist.github.com/byteface/9ca8c3d885d08284bfaebef6256591b2
 
+At the time I'd it was cobbled out of necessity but I ended up using it for many years. Recently I needed the same kind of thing and decided to rebuild it in Rust so it's simpler to bundle.
+
+
 ## Features
 
 - open a local text file
