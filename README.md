@@ -23,12 +23,12 @@ This Rust app is inspired by this tiny python prototype:
 
 https://gist.github.com/byteface/9ca8c3d885d08284bfaebef6256591b2
 
-At the time I'd it was cobbled out of necessity but I ended up using it for many years. Recently I needed the same kind of thing and decided to rebuild it in Rust so it's simpler to bundle.
-
+At the time it was cobbled together out of necessity, but I ended up using it for years. Recently I needed the same kind of thing again and decided to rebuild it in Rust so it is easier to bundle and ship.
 
 ## Features
 
 - open a local text file
+- open recent files
 - read-only viewer
 - hide on focus loss
 - reveal on focus
@@ -36,12 +36,13 @@ At the time I'd it was cobbled out of necessity but I ended up using it for many
 - `Auto Show On Focus` toggle
 - dark mode
 - window opacity control
+- spacebar show/hide toggle
 - remembers last file and window position
 - manual `Show` and `Hide` controls
 
 ## Rust Build
 
-Check the makefile to build for your platform
+Check the `Makefile` to build for your platform.
 
 ```bash
 make run
